@@ -29,6 +29,70 @@ This architecture separates concerns, improves security, enhances extensibility,
 
 ---
 
+## 🔗 Multi-Tenancy
+
+The system supports multi-tenancy for data isolation in OID4VCI workflows. The Credential Issuer and Authorization Server use a **database-per-tenant** model, where each tenant has a dedicated PostgreSQL database with the same schema (e.g., `SUBJECT`, `ACCESS_TOKEN`).
+
+**Key Features**:
+
+- **Database-Per-Tenant Model**:
+
+  - Each tenant (identified by `tenant-id`) maps to a separate database (e.g., `tenant1_db`).
+  - In single-tenant deployments, non-prefixed endpoints like /token and /credential implicitly use the default tenant (default_db). These endpoints remain compatible with wallets that don't support tenant-prefixed URIs.
+  - All tenant databases use the same schema version, managed via Alembic migrations, ensuring consistency across deployments.
+  - Enforcement: Tokens must only be used in the context of their issuing tenant. Cross-tenant use will return HTTP 401 (invalid_token).
+  - Benefits: Strong isolation, independent scaling, and deployment flexibility across regions and environments.
+
+- **Tenant Configuration**:
+
+  - Mappings stored in a configuration file or central store:
+
+    | Tenant ID | Database URL                  | Firebase Project ID |
+    | --------- | ----------------------------- | ------------------- |
+    | tenant1   | `postgresql://.../tenant1_db` | `tenant1-firebase`  |
+    | tenant2   | `postgresql://.../tenant2_db` | `tenant2-firebase`  |
+    | default   | `postgresql://.../default_db` | `default-firebase`  |
+
+  - The firebase_project_id is used for verifying client attestation (optional). If attestation is disabled, this value may be omitted
+
+- **Endpoint Structures**:
+
+  - Multi-Tenant: Prefix with /tenants/{tenant-id}/ (e.g., /tenants/tenant1/token).
+  - Single-Tenant: Use non-prefixed endpoints (e.g., /token).
+  - Alignment: Matches Credential issuer's /tenants/{tenant-id}/xxx.
+  - Resolution: From path for multi-tenant; defaults to "default" for single-tenant.
+
+- **Token Scoping**:
+
+  - Tokens include a realm claim (e.g., "realm": "tenant1").
+  - Example Payload:
+
+```json
+{
+  "sub": "did:example:abcd1234",
+  "realm": "tenant1",
+  "cnf": {
+    "jkt": "base64url-encoded-thumbprint"
+  }
+}
+```
+
+- Validation: Match realm to request context during introspection.
+
+- **Security and Isolation**:
+
+  - Physical separation prevents cross-tenant leakage.
+  - Tenant-specific credentials (database users, Firebase projects) and CORS restrictions.
+  - Errors: 400 invalid_tenant – Tenant not found
+
+- **Provisioning and Maintenance**:
+
+  - Automate with scripts (e.g., CREATE DATABASE tenant1_db; then schema migration).
+  - Migrations: Use Alembic to apply changes across databases.
+  - Monitoring: Per-tenant performance monitoring with tools like pg_stat_activity.
+
+---
+
 ## 🛠️ Key Features & Requirements Mapping
 
 | #   | Feature                      | Component            | Description                                                   |
@@ -46,14 +110,36 @@ This architecture separates concerns, improves security, enhances extensibility,
 
 ```mermaid
 graph TD
-  Wallet -->|GET /credential_offer| Issuer[OID4VC Issuer]
-  Wallet -->|POST /token| AuthServer[Authorization Server]
-  Wallet -->|POST /credential| Issuer
-  Wallet -->|GET /nonce| Issuer
-  Issuer -->|POST /grants/pre-authorization-code| AuthServer
-  Issuer -->|POST /introspect| AuthServer
-  AuthServer --> DB[(PostgreSQL)]
+    subgraph Public
+        Wallet[Wallet]
+        Firebase[Firebase App Check]
+    end
+
+    subgraph DTI
+        Issuer[OID4VC Issuer]
+        AuthServer[Authorization Server]
+        DB1[(Tenant1 DB)]
+        DB2[(Tenant2 DB)]
+        DBn[(TenantN DB)]
+        DBDefault[(Default DB)]
+    end
+
+    Wallet -->|/credential_offer| Issuer
+    Wallet -->|/token| AuthServer
+    Wallet -->|/credential| Issuer
+    Wallet -->|/nonce| Issuer
+    Wallet -->|Attestation JWT| Firebase
+
+    Issuer -->|/grants/pre-authorized-code| AuthServer
+    Issuer -->|/introspect| AuthServer
+    AuthServer -->|Verify Attestation| Firebase
+    AuthServer -->|Store/Retrieve Tenant1| DB1
+    AuthServer -->|Store/Retrieve Tenant2| DB2
+    AuthServer -->|Store/Retrieve TenantN| DBn
+    AuthServer -->|"Store/Retrieve Default"| DBDefault
 ```
+
+**Multi-Tenancy Note**: For multi-tenant deployments, endpoints can be prefixed with `/tenants/{tenant-id}/` to route to tenant-specific databases. See the [Multi-Tenancy](#multi-tenancy) section for details on database-per-tenant model, tenant configuration, and token scoping with the `realm` claim.
 
 ---
 
@@ -455,7 +541,7 @@ sequenceDiagram
     Wallet->>CredentialIssuer: GET /nonce
     CredentialIssuer->>DB: Store nonce (value, expires_at, used=false)
     DB-->>CredentialIssuer: Nonce stored
-    CredentialIssuer-->>Wallet: nonce, expires_in
+    CredentialIssuer-->>Wallet: nonce, expires_at
     Wallet->>CredentialIssuer: POST /credential + nonce in proof
     CredentialIssuer->>DB: Validate nonce (exists, used=false, not expired)
     alt Nonce Valid
@@ -491,6 +577,8 @@ sequenceDiagram
 | `/nonce`                                | GET    | None          | Nonce for credential proof       |
 | `/.well-known/openid-credential-issuer` | GET    | None          | OID4VC Issuer metadata discovery |
 
+**Multi-Tenancy Note**: For multi-tenant deployments, endpoints can be prefixed with `/tenants/{tenant-id}/` to route to tenant-specific databases. See the [Multi-Tenancy](#multi-tenancy) section for details on database-per-tenant model, tenant configuration, and token scoping with the `realm` claim.
+
 ---
 
 ### 🔐 `POST /token`
@@ -516,7 +604,7 @@ user_pin=1234
   "access_token": "eyJhbGciOi...",
   "refresh_token": "xyz456",
   "token_type": "Bearer",
-  "expires_in": 600,
+  "expires_at": "iso-8601-datetime",
   "scope": "openid vc_authn vc_business_card",
   "authorization_details": [
     {
@@ -725,7 +813,7 @@ GET /nonce
 ```json
 {
   "nonce": "123456789abcdef",
-  "expires_in": 300
+  "expires_at": "iso-8601-datetime"
 }
 ```
 
@@ -798,84 +886,93 @@ GET /.well-known/openid-configuration
 
 ## 🗄️ Database Schema Diagram
 
-Note: this project uses PostgreSQL as persistence engine, and **singular table names** for consistency and readability.
+This project uses PostgreSQL as the persistence engine. For consistency and readability, we adhere to the following conventions:
+
+- Singular table names: Aligns with modern ORM practices (e.g., SQLAlchemy) and avoids pluralization ambiguities.
+- Timestamps: All tables include created_at and updated_at fields (using TIMESTAMPTZ) for auditing and versioning, defaulting to CURRENT_TIMESTAMP on insert/update.
+- Foreign Keys: Use ON DELETE CASCADE for child records (e.g., tokens tied to a subject) to prevent orphans, and ON UPDATE CASCADE for ID propagation.
+- Indexing: Key fields are indexed for performance. The last column in the schema diagram indicates:
+  - PK: Primary Key
+  - FK: Foreign Key
+  - UK: Unique index for uniqueness enforcement and fast lookups (maps to PostgreSQL CREATE UNIQUE INDEX)
+  - INDEX: Non-unique index for fast lookups (maps to PostgreSQL CREATE INDEX)
 
 ```mermaid
 erDiagram
-  ACCESS_TOKEN ||--|{ REFRESH_TOKEN : rotated_by
-  SUBJECT ||--o{ PRE_AUTH_CODE : issued
-  SUBJECT ||--o{ ACCESS_TOKEN : manages
-  SUBJECT ||--o{ REFRESH_TOKEN : manages
-  SUBJECT ||--o{ DPOP_JTI : manages
+    ACCESS_TOKEN ||--|{ REFRESH_TOKEN : rotated_by
+    SUBJECT ||--o{ PRE_AUTH_CODE : issued
+    SUBJECT ||--o{ ACCESS_TOKEN : manages
+    SUBJECT ||--o{ REFRESH_TOKEN : manages
+    SUBJECT ||--o{ DPOP_JTI : manages
+    SUBJECT ||--o{ NONCE : manages
 
-  SUBJECT {
-    INT id PK
-    JSONB metadata
-    TIMESTAMPTZ created_at
-    TIMESTAMPTZ updated_at
-  }
+    SUBJECT {
+        INT id PK
+        JSONB metadata
+        TIMESTAMPTZ created_at
+        TIMESTAMPTZ updated_at
+    }
 
-  PRE_AUTH_CODE {
-    INT id PK
-    INT subject_id FK
-    TEXT code
-    TEXT user_pin
-    BOOLEAN user_pin_required
-    JSONB authorization_details
-    TIMESTAMPTZ expires_at
-    TIMESTAMPTZ issued_at
-    BOOLEAN used
-  }
+    PRE_AUTH_CODE {
+        INT id PK
+        INT subject_id FK
+        TEXT code UK
+        TEXT user_pin
+        BOOLEAN user_pin_required
+        JSONB authorization_details
+        TIMESTAMPTZ expires_at
+        TIMESTAMPTZ issued_at
+        BOOLEAN used
+    }
 
-  ACCESS_TOKEN {
-    INT id PK
-    INT subject_id FK
-    TEXT token
-    TIMESTAMPTZ issued_at
-    TIMESTAMPTZ expires_at
-    BOOLEAN revoked
-    TEXT cnf_jkt
-    JSONB metadata
-    JSONB attestation
-  }
+    ACCESS_TOKEN {
+        INT id PK
+        INT subject_id FK
+        TEXT token UK
+        TIMESTAMPTZ issued_at
+        TIMESTAMPTZ expires_at
+        BOOLEAN revoked
+        TEXT cnf_jkt "INDEX"
+        JSONB metadata
+        JSONB attestation
+    }
 
-  REFRESH_TOKEN {
-    INT id PK
-    INT subject_id FK
-    INT access_token_id FK
-    TEXT token
-    TIMESTAMPTZ issued_at
-    TIMESTAMPTZ expires_at
-    BOOLEAN used
-    BOOLEAN revoked
-    JSONB metadata
-  }
+    REFRESH_TOKEN {
+        INT id PK
+        INT subject_id FK
+        INT access_token_id FK
+        TEXT token UK
+        TIMESTAMPTZ issued_at
+        TIMESTAMPTZ expires_at
+        BOOLEAN used
+        BOOLEAN revoked
+        JSONB metadata
+    }
 
+    DPOP_JTI {
+        INT id PK
+        INT subject_id FK
+        TEXT jti UK
+        TEXT htm
+        TEXT htu
+        TEXT cnf_jkt
+        TIMESTAMPTZ issued_at
+        TIMESTAMPTZ expires_at
+    }
 
-  DPOP_JTI {
-    INT id PK
-    INT subject_id FK
-    TEXT jti
-    TEXT htm
-    TEXT htu
-    TEXT cnf_jkt
-    TIMESTAMPTZ issued_at
-    TIMESTAMPTZ expires_at
-  }
-
-  NONCE {
-    INT id PK
-    UUID credential_id FK
-    TEXT value
-    BOOLEAN used
-    TIMESTAMPTZ issued_at
-    TIMESTAMPTZ expires_at
-  }
+    NONCE {
+        INT id PK
+        UUID credential_id FK
+        TEXT value UK
+        BOOLEAN used
+        TIMESTAMPTZ issued_at
+        TIMESTAMPTZ expires_at
+    }
 ```
 
 ---
 
-## Enhancements & Security Notes
+## 🛡️ Enhancements & Security Notes
 
 - **Logging**: Audit issuance, revocation, refresh events.
 - **Rate Limiting**: Throttle abuse or brute-force attempts.
@@ -884,7 +981,7 @@ erDiagram
 - **DPoP Key Lifecycle**: Clients manage DPoP key pairs; rotate if compromised.
 - **CORS**: Restrict cross-origin requests where applicable.
 
-## Terminology
+## 📘 Terminology
 
 - **JWT (JSON Web Token)**: A compact, signed token format for secure data exchange (RFC 7519).
 - **JWK (JSON Web Key)**: A JSON representation of a cryptographic key (RFC 7517).
@@ -893,3 +990,4 @@ erDiagram
 - **DPoP (Demonstration of Proof-of-Possession)**: A mechanism to bind access tokens to a client’s private key, ensuring only the authorized client can use the token (RFC 9449).
 - **Attestation**: A cryptographically verifiable claim about a client’s properties (e.g., app integrity), provided by a wallet provider and verified by the Authorization Server.
 - **Pre-authorized Code**: A one-time-use code issued by the Authorization Server to enable credential issuance without user login in the OID4VCI flow.
+- Realm: A logical identifier that maps a token to a specific tenant.
