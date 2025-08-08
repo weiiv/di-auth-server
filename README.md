@@ -13,7 +13,7 @@ This system supports **secure, standards-compliant issuance of Verifiable Creden
 - 🔐 **Pre-Authorized Code Flow** – Enables issuance without user login
 - 🛡️ **DPoP-bound Access Tokens** – Proof-of-possession enforcement ([RFC 9449](https://www.rfc-editor.org/rfc/rfc9449.html))
 - 📄 **Authorization Details** – Credential-specific authorization rules ([RFC 9396](https://www.rfc-editor.org/rfc/rfc9396.html))
-- 🧾 **Attestation Support** – Embed verified claims directly into issued credentials
+- 🧾 **Attestation Support** – Verified by the Credential Issuer using trusted attestation providers, embed verified claims directly into issued credentials
 - 🔁 **Refresh Token Rotation** – Mitigates token reuse and supports long-lived sessions
 - 🧠 **Token Introspection** – Fine-grained validation with embedded credential metadata
 - 🌐 **Metadata Discovery** – Standards-based wallet interoperability via `.well-known` endpoints
@@ -102,7 +102,8 @@ The system supports multi-tenancy for data isolation in OID4VCI workflows. The C
 | 3   | Refresh Token issued         | Auth Server          | Every access token comes with a refresh token.                |
 | 4   | Refresh Token rotation       | Auth Server          | One-time-use refresh tokens; replaced with each request.      |
 | 5   | Decoupled authorization      | Auth Server + Config | Tokens validated externally or by config-swappable AS.        |
-| 6   | `/nonce` endpoint            | Credential Issuer    | Required for OID4VCI Draft 15; prevents nonce reuse.          |
+| 6   | Attestation verification     | Credential Issuer    | Verify client_attestation JWT via Firebase/App Attest         |
+| 7   | `/nonce` endpoint            | Credential Issuer    | Required for OID4VCI Draft 15; prevents nonce reuse.          |
 
 ---
 
@@ -128,15 +129,15 @@ graph TD
     Wallet -->|/token| AuthServer
     Wallet -->|/credential| Issuer
     Wallet -->|/nonce| Issuer
-    Wallet -->|Attestation JWT| Firebase
 
     Issuer -->|/grants/pre-authorized-code| AuthServer
     Issuer -->|/introspect| AuthServer
-    AuthServer -->|Verify Attestation| Firebase
+    Issuer -->|Verify Attestation| Firebase
+
     AuthServer -->|Store/Retrieve Tenant1| DB1
     AuthServer -->|Store/Retrieve Tenant2| DB2
     AuthServer -->|Store/Retrieve TenantN| DBn
-    AuthServer -->|"Store/Retrieve Default"| DBDefault
+    AuthServer -->|Store/Retrieve Default| DBDefault
 ```
 
 **Multi-Tenancy Note**: For multi-tenant deployments, endpoints can be prefixed with `/tenants/{tenant-id}/` to route to tenant-specific databases. See the [Multi-Tenancy](#multi-tenancy) section for details on database-per-tenant model, tenant configuration, and token scoping with the `realm` claim.
@@ -170,10 +171,9 @@ sequenceDiagram
   AuthorizationServer-->>CredentialIssuer: pre-authorized-code
   CredentialIssuer-->>Wallet: credential_offer_uri
   Wallet->>AuthorizationServer: POST /token
-    Note over Wallet, AuthorizationServer: Includes:<br/>- pre-authorized_code<br/>- DPoP JWT<br/>- client_attestation JWT
+    Note over Wallet, AuthorizationServer: Includes:<br/>- pre-authorized_code<br/>- DPoP JWT
   alt Token Request Valid
-    AuthorizationServer->>Attestation Provider: Verify attestation (Firebase / App Attest)
-    AuthorizationServer->>DB: Store access_token with jkt + attestation
+    AuthorizationServer->>DB: Store access_token with jkt
     AuthorizationServer-->>Wallet: access_token, refresh_token
   else Token Request Invalid
     AuthorizationServer-->>Wallet: HTTP 400 (invalid_request)
@@ -181,11 +181,12 @@ sequenceDiagram
   Wallet->>CredentialIssuer: GET /nonce
   CredentialIssuer-->>Wallet: nonce
   Wallet->>CredentialIssuer: POST /credential
-    Note over Wallet, CredentialIssuer: Includes:<br/>- access_token<br/>- DPoP JWT<br/>- credential proof (with /nonce)
+    Note over Wallet, CredentialIssuer: Includes:<br/>- access_token<br/>- DPoP JWT<br/>- client_attestation JWT<br/>- credential proof (with /nonce)
   alt Credential Request Valid
     CredentialIssuer->>AuthorizationServer: POST /introspect
-    AuthorizationServer->>DB: Validate token, return jkt + attestation
-    AuthorizationServer-->>CredentialIssuer: token + attestation + jkt
+    AuthorizationServer->>DB: Validate token, return jkt
+    AuthorizationServer-->>CredentialIssuer: token + jkt
+    CredentialIssuer->>Attestation Provider: Verify attestation (Firebase / App Attest)
     CredentialIssuer-->>Wallet: Verifiable Credential
   else Credential Request Invalid
     CredentialIssuer-->>Wallet: HTTP 400 (invalid_request)
@@ -219,23 +220,23 @@ sequenceDiagram
 
 ### 🛡️ Enforcement Points
 
-| Component            | Validates                                                                                                                                                                           |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Authorization Server | - Pre-auth code<br/>- DPoP JWT (proof-of-possession)<br/>- Attestation JWT<br/>- Refresh token (secondary enforcement via rotation; validated for `used=false` and `revoked=false`) |
-| Credential Issuer    | - Introspection (active token, jkt match)<br/>- Nonce proof                                                                                                                         |
+| Component            | Validates                                                                                                                                                     |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Authorization Server | - Pre-auth code<br/>- DPoP JWT (proof-of-possession)<br/>- Refresh token (secondary enforcement via rotation; validated for `used=false` and `revoked=false`) |
+| Credential Issuer    | - Introspection (active token, jkt match)<br/>- Attestation JWT (via Firebase/App Attest)<br/>- Nonce proof                                                   |
 
 ---
 
 ### 📦 Notes
 
-- Attestation result is stored **in `access_token.attestation`**
-- DPoP `jkt` thumbprint is stored in `access_token.cnf_jkt`
-- `/credential` endpoint uses `/introspect` to retrieve and validate both
-- Wallets use Firebase App Check to handle both Android and iOS attestation
+- Attestation is **verified by the Credential Issuer** during the `/credential` request.
+- DPoP `jkt` thumbprint is stored in `access_token.cnf_jkt`; proof-of-possession is also validated by the Credential Issuer.
+- The `/credential` endpoint uses `/introspect` to validate the access token and retrieve embedded claims (e.g., `cnf.jkt`), then performs its own DPoP checks.
+- Wallets use **Firebase App Check** to generate `client_attestation` JWTs on Android and iOS, which are passed to the Credential Issuer for validation.
 
 ---
 
-## 🧾 Attestation-Based Client Authentication
+## 🧾 Attestation Validation
 
 ### ✅ Overview
 
@@ -246,7 +247,7 @@ This implementation supports Attestation-Based Client Authentication (ABCA) as o
 
 Attestation enables wallets or clients to prove properties about themselves—such as app integrity or device trustworthiness—during token or credential issuance. These claims are cryptographically verifiable and can influence credential access policies.
 
-The wallet provider generates an attestation credential (e.g., Firebase App Check JWT for Android/iOS) and includes it as the client_attestation header in the /token request. The Authorization Server verifies this using Firebase’s REST API and decides whether to trust the wallet based on configurable trust policies (e.g., auto_trust or allow_list). The issuance of attestation credentials is handled by the wallet provider and is out of scope for this system.
+The wallet provider generates an attestation credential (e.g., Firebase App Check JWT for Android/iOS). The wallet includes it in the /credential request as the client_attestation field. The Credential Issuer verifies the token and decides whether to issue the credential based on trust policies (e.g., auto_trust or allow_list).
 
 ---
 
@@ -257,60 +258,69 @@ This project supports **attestation-based client authentication** using [Firebas
 - **Android** (via **Play Integrity API**)
 - **iOS** (via **Apple App Attest**)
 
-Wallets use platform-specific APIs under the hood, but both produce a signed **App Check JWT**, which is submitted to the Authorization Server and verified via Firebase’s REST API.
+Wallets use platform-specific APIs under the hood, but both produce a signed **App Check JWT**, which is submitted to the Credential Issuer, and verified by the Issuer using Firebase’s REST API.
 
 ---
 
 ### ✅ Attestation Flow
 
-1. Wallet app integrates Firebase App Check.
-2. On startup or request, wallet obtains an **App Check token** (JWT) from Firebase via the wallet provider.
-3. Wallet includes the token as `client_attestation` when calling `/token`.
-4. Authorization Server verifies the token using Firebase’s REST API.
-5. If valid, the result is stored and can influence credential authorization.
+Attestations (e.g., Firebase App Check tokens, device claims) are generated and signed by the wallet or mobile platform provider. These signed JWTs are passed by the wallet in the client_attestation field during the credential request.
+
+The Authorization Server is responsible for OAuth2 flows only (e.g., pre-authorized_code, DPoP access tokens) and does not validate attestations.
+
+The Credential Issuer validates the attestation JWT by verifying its signature, extracting trusted metadata, and applying a configurable trust policy to decide whether to issue the requested credential.
 
 ```mermaid
+
 sequenceDiagram
     participant Wallet
     participant WalletProvider
-    participant AuthServer
+    participant AuthServer as Authorization Server
+    participant Issuer as Credential Issuer
     participant Firebase
+
     Wallet->>WalletProvider: Request attestation credential
     WalletProvider->>Firebase: Get App Check token
     Firebase-->>WalletProvider: JWT attestation token
     WalletProvider-->>Wallet: JWT attestation token
-    Wallet->>AuthServer: POST /token + client_attestation header + DPoP
-    AuthServer->>Firebase: Verify JWT via REST API
+    Wallet->>AuthServer: Request access token (pre-authorized code + DPoP)
+    AuthServer-->>Wallet: access_token
+    Wallet->>Issuer: Credential request + client_attestation JWT
+    Issuer->>Firebase: Verify attestation via REST API
     alt Attestation Valid
-    Firebase-->>AuthServer: Token valid
-    AuthServer->>DB: Store attestation result
-    AuthServer-->>Wallet: access_token + refresh_token
+        Firebase-->>Issuer: Token valid
+        Issuer->>Wallet: Verifiable Credential
     else Attestation Invalid
-    Firebase-->>AuthServer: Token invalid
-    AuthServer-->>Wallet: HTTP 400 (invalid_request)
+        Firebase-->>Issuer: Token invalid
+        Issuer-->>Wallet: Error (e.g., 400 invalid_attestation)
     end
 ```
 
+> _Note: Attestation is only evaluated at the credential issuance step._
+
 ---
 
-### 🧾 Sample `client_attestation` Field
+### 🧾 Sample Credential Request with client_attestation
 
-**Included in `/token` request:**
+**Included in `/credential` request:**
 
 ```http
-POST /token
-Content-Type: application/x-www-form-urlencoded
+POST /credential
+Authorization: Bearer <access_token>
 DPoP: <signed DPoP JWT>
-client_attestation: eyJhbGciOiJSUzI1NiIs...
-grant_type=urn:ietf:params:oauth:grant-type:pre-authorized_code&
-pre-authorized_code=abc123
+Content-Type: application/json
+
+{
+  "format": "vc+sd-jwt",
+  "type": "OntarioBusinessCard",
+  "client_attestation": "eyJhbGciOiJSUzI1NiIs...",   // add this
+  "proof": { "proof_type": "jwt", "jwt": "..." }
+}
 ```
 
 ---
 
-### 🔍 Backend Verification
-
-**Verify using Firebase REST API:**
+### 🔍 Verify using Firebase REST API (performed by Credential Issuer):
 
 ```http
 POST https://firebaseappcheck.googleapis.com/v1/projects/{project-id}/apps/{app-id}:verifyAppCheckToken
@@ -333,10 +343,6 @@ Content-Type: application/json
 }
 ```
 
----
-
-### 🔒 Authorization Rules
-
 - ✅ Allow credentials only for verified Firebase apps
 - 🔐 Enforce known app package IDs or Apple team IDs
 - 🚫 Block requests from rooted/jailbroken/emulated devices
@@ -344,16 +350,14 @@ Content-Type: application/json
 
 ---
 
-## 🔐 Attestation Trust Policy
-
 ### 🧭 Trust Decision Logic
 
-In addition to Firebase App Check verification, a configurable trust policy can be employed by the **Credential Issuer** based on attestation metadata. This enables selective issuance to trusted wallets only.
+The **Credential Issuer**, after verifying the attestation token, applies a trust policy to determine if the wallet is authorized to receive a credential.
 
 ### ⚙️ Trust Policy Flow
 
-1. **Attestation Verification** – Performed by the Authorization Server via Firebase REST API.
-2. **Trust Decision** – Made by the Credential Issuer after `introspect`, using:
+1. **Attestation Verification** – Performed by the Credential Issuer via Firebase REST API.
+2. **Trust Decision** – Made using:
    - `attestation.sub`: Subject identifier in the attestation token.
    - `cnf.jkt`: Client's DPoP key thumbprint.
 3. **Trust Policy Modes**:
@@ -503,8 +507,8 @@ sequenceDiagram
     AuthServer-->>CredentialIssuer: pre-auth-code
     CredentialIssuer-->>Wallet: credential_offer_uri (QR or link)
 
-    Wallet->>AuthServer: GET /.well-known/openid-credential-issuer
-    AuthServer-->>Wallet: Metadata (token/credential endpoints)
+    Wallet->>CredentialIssuer: GET /.well-known/openid-credential-issuer
+    CredentialIssuer-->>Wallet: Metadata (token/credential endpoints)
 
     Wallet->>AuthServer: POST /token (pre-auth-code + DPoP)
     AuthServer->>DB: Validate code, bind DPoP
@@ -591,7 +595,6 @@ Exchanges a pre-authorized code or refresh token for an access token and new ref
 POST /token
 Content-Type: application/x-www-form-urlencoded
 DPoP: <signed DPoP JWT>
-client_attestation: eyJhbGciOiJSUzI1NiIs...
 grant_type=urn:ietf:params:oauth:grant-type:pre-authorized_code&
 pre-authorized_code=abc123&
 user_pin=1234
@@ -621,7 +624,7 @@ user_pin=1234
 
 **Errors**:
 
-- HTTP 400 (invalid_request): Invalid pre-authorized code, DPoP JWT, or attestation JWT.
+- HTTP 400 (invalid_request): Invalid pre-authorized code, DPoP JWT.
 - HTTP 401 (invalid_token): Invalid or revoked refresh token.
 
 ---
@@ -662,7 +665,8 @@ token_type_hint=access_token
   "cnf": {
     "jkt": "QmFzZTY0ZW5jb2RlZFRodW1icHJpbnQ="
   },
-  "iss": "https://auth.example.com"
+  "iss": "https://auth.example.com",
+  "realm": "tenant1"
 }
 ```
 
@@ -778,7 +782,7 @@ Decoded credential_offer:
 ```json
 {
   "credential_offer": {
-    "credential_issuer": "https://auth.example.com",
+    "credential_issuer": "https://issuer.example.com",
     "grants": {
       "urn:ietf:params:oauth:grant-type:pre-authorized_code": {
         "pre-authorized_code": "abc123",
@@ -870,6 +874,7 @@ GET /.well-known/openid-configuration
   "grant_types_supported": [
     "urn:ietf:params:oauth:grant-type:pre-authorized_code"
   ],
+  "authorization_details_types_supported": ["openid_credential"],
   "jwks_uri": "https://auth.example.com/jwks",
   "introspection_endpoint": "https://auth.example.com/introspect"
 }
@@ -880,7 +885,7 @@ GET /.well-known/openid-configuration
 - Standard OAuth2 errors: `invalid_token`, `expired_token`, `invalid_grant`, etc.
 - DPoP errors: `invalid_dpop_proof`, `replay_detected` (see [DPoP Support](#dpop-support)).
 - Nonce errors: `invalid_request` for invalid or expired nonces, `too_many_requests` for exceeding rate limits (see [Nonce Replay Prevention Controls](#nonce-replay-prevention-controls)).
-- Attestation errors: `invalid_request` for invalid or unverified attestation JWTs (see [Attestation-Based Client Authentication](#attestation-based-client-authentication)).
+- Attestation errors: `invalid_attestation` or `invalid_request`, returned by the Credential Issuer if the `client_attestation` JWT is missing, malformed, expired, or fails verification (see [Attestation Validation](#attestation-validation)).
 
 ---
 
@@ -934,7 +939,6 @@ erDiagram
         BOOLEAN revoked
         TEXT cnf_jkt "INDEX"
         JSONB metadata
-        JSONB attestation
     }
 
     REFRESH_TOKEN {
@@ -988,6 +992,6 @@ erDiagram
 - **JKT (JSON Web Key Thumbprint)**: A base64url-encoded hash of a JWK, used to uniquely identify a client’s public key (RFC 7638). In this system, JKT is used in DPoP and attestation flows.
 - **JTI (JSON Web Token ID)**: A unique identifier for a JWT, used to prevent replay in DPoP flows.
 - **DPoP (Demonstration of Proof-of-Possession)**: A mechanism to bind access tokens to a client’s private key, ensuring only the authorized client can use the token (RFC 9449).
-- **Attestation**: A cryptographically verifiable claim about a client’s properties (e.g., app integrity), provided by a wallet provider and verified by the Authorization Server.
+- **Attestation**: A cryptographically verifiable claim about a client’s properties (e.g., app integrity), provided by a wallet provider and verified by the Credential Issuer.
 - **Pre-authorized Code**: A one-time-use code issued by the Authorization Server to enable credential issuance without user login in the OID4VCI flow.
 - Realm: A logical identifier that maps a token to a specific tenant.
