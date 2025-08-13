@@ -1,19 +1,19 @@
 # OpenID for Verifiable Credential Issuance with Authorization Server
 
-> Reference implementation of OID4VCI-compliant issuance with decoupled Auth Server
+> Reference implementation of OID4VCI-compliant issuance with a decoupled Authorization Server
 
 ## 📌 Overview
 
 This project delivers a **modular, production-ready Authorization Server** purpose-built for **OpenID for Verifiable Credential Issuance (OID4VCI)** workflows.
 
-While the existing OID4VCI Credential Issuer handles basic, prototype-level authorization internally, this work cleanly separates that responsibility by introducing a **dedicated Authorization Server**. The issuer is now focused solely on credential generation, with all access control, grant issuance, and token validation delegated to the new Auth Server.
+While the existing OID4VCI Credential Issuer handled prototype-grade authorization internally, this work cleanly separates that responsibility by introducing a **dedicated Authorization Server (AS)**. The Issuer is now focused solely on credential generation, while **all access control, grant issuance, token validation, and attestation PoP verification** are delegated to the AS.
 
-This system supports **secure, standards-compliant issuance of Verifiable Credentials (VCs)** and is designed for integration with modern digital wallets. It includes:
+This system supports **secure, standards-aligned issuance of Verifiable Credentials (VCs)** and is designed for integration with modern digital wallets. It includes:
 
 - 🔐 **Pre-Authorized Code Flow** – Enables issuance without user login
 - 🛡️ **DPoP-bound Access Tokens** – Proof-of-possession enforcement ([RFC 9449](https://www.rfc-editor.org/rfc/rfc9449.html))
 - 📄 **Authorization Details** – Credential-specific authorization rules ([RFC 9396](https://www.rfc-editor.org/rfc/rfc9396.html))
-- 🧾 **Attestation Support** – Verified by the Credential Issuer using trusted attestation providers, embed verified claims directly into issued credentials
+- 🧾 **Attestation PoP** – Verified by the Authorization Server using attestation PoP JWT presented by the wallet
 - 🔁 **Refresh Token Rotation** – Mitigates token reuse and supports long-lived sessions
 - 🧠 **Token Introspection** – Fine-grained validation with embedded credential metadata
 - 🌐 **Metadata Discovery** – Standards-based wallet interoperability via `.well-known` endpoints
@@ -23,7 +23,7 @@ This system supports **secure, standards-compliant issuance of Verifiable Creden
 - **Authorization Server** (FastAPI + Authlib)
 - **Credential Issuer** with delegated authorization and introspection integration
 - **PostgreSQL** for persistence of grants, tokens, and credential metadata
-- **Support for DPoP, Authorization Details, Attestations, Refresh Tokens rotation**
+- **Support for DPoP, Authorization Details, Attestation PoP, Refresh Token rotation**
 
 This architecture separates concerns, improves security, enhances extensibility, and provides a scalable foundation for OID4VCI credential issuance in production environments.
 
@@ -38,72 +38,54 @@ The system supports multi-tenancy for data isolation in OID4VCI workflows. The C
 - **Database-Per-Tenant Model**:
 
   - Each tenant (identified by `tenant-id`) maps to a separate database (e.g., `tenant1_db`).
-  - In single-tenant deployments, non-prefixed endpoints like /token and /credential implicitly use the default tenant (default_db). These endpoints remain compatible with wallets that don't support tenant-prefixed URIs.
-  - All tenant databases use the same schema version, managed via Alembic migrations, ensuring consistency across deployments.
-  - Enforcement: Tokens must only be used in the context of their issuing tenant. Cross-tenant use will return HTTP 401 (invalid_token).
-  - Benefits: Strong isolation, independent scaling, and deployment flexibility across regions and environments.
+  - In single-tenant deployments, non-prefixed endpoints like `/token` and `/credential` implicitly use the default tenant (`default_db`).
+  - All tenant databases use the same schema version via Alembic migrations.
+  - Enforcement: Tokens must only be used in the context of their issuing tenant. Cross-tenant use returns HTTP 401 (`invalid_token`).
 
 - **Tenant Configuration**:
 
   - Mappings stored in a configuration file or central store:
 
-    | Tenant ID | Database URL                  | Firebase Project ID |
-    | --------- | ----------------------------- | ------------------- |
-    | tenant1   | `postgresql://.../tenant1_db` | `tenant1-firebase`  |
-    | tenant2   | `postgresql://.../tenant2_db` | `tenant2-firebase`  |
-    | default   | `postgresql://.../default_db` | `default-firebase`  |
-
-  - The firebase_project_id is used for verifying client attestation (optional). If attestation is disabled, this value may be omitted
+    | Tenant ID | Database URL                  |
+    | --------- | ----------------------------- |
+    | tenant1   | `postgresql://.../tenant1_db` |
+    | tenant2   | `postgresql://.../tenant2_db` |
+    | default   | `postgresql://.../default_db` |
 
 - **Endpoint Structures**:
 
-  - Multi-Tenant: Prefix with /tenants/{tenant-id}/ (e.g., /tenants/tenant1/token).
-  - Single-Tenant: Use non-prefixed endpoints (e.g., /token).
-  - Alignment: Matches Credential issuer's /tenants/{tenant-id}/xxx.
-  - Resolution: From path for multi-tenant; defaults to "default" for single-tenant.
+  - Multi-Tenant: Prefix with `/tenants/{tenant-id}/` (e.g., `/tenants/tenant1/token`).
+  - Single-Tenant: Use non-prefixed endpoints (e.g., `/token`).
 
 - **Token Scoping**:
 
-  - Tokens include a realm claim (e.g., "realm": "tenant1").
-  - Example Payload:
-
-```json
-{
-  "sub": "did:example:abcd1234",
-  "realm": "tenant1",
-  "cnf": {
-    "jkt": "base64url-encoded-thumbprint"
-  }
-}
-```
-
-- Validation: Match realm to request context during introspection.
+  - Tokens include a realm claim (e.g., `"realm": "tenant1"`).
+  - Validation ensures realm matches request context during introspection.
 
 - **Security and Isolation**:
 
   - Physical separation prevents cross-tenant leakage.
-  - Tenant-specific credentials (database users, Firebase projects) and CORS restrictions.
-  - Errors: 400 invalid_tenant – Tenant not found
+  - Tenant-specific DB credentials and CORS restrictions.
+  - Errors: `400 invalid_tenant` – Tenant not found.
 
 - **Provisioning and Maintenance**:
-
-  - Automate with scripts (e.g., CREATE DATABASE tenant1_db; then schema migration).
+  - Automate with scripts (e.g., `CREATE DATABASE tenant1_db;` then schema migration).
   - Migrations: Use Alembic to apply changes across databases.
-  - Monitoring: Per-tenant performance monitoring with tools like pg_stat_activity.
+  - Monitoring: Per-tenant performance monitoring with tools like `pg_stat_activity`.
 
 ---
 
 ## 🛠️ Key Features & Requirements Mapping
 
-| #   | Feature                      | Component            | Description                                                   |
-| --- | ---------------------------- | -------------------- | ------------------------------------------------------------- |
-| 1   | Credential update & re-issue | Credential Issuer    | Revoked credential can be reissued; old version deleted.      |
-| 2   | Credential cleanup           | Cron + DB            | Periodic cleanup of expired credential (soft or hard delete). |
-| 3   | Refresh Token issued         | Auth Server          | Every access token comes with a refresh token.                |
-| 4   | Refresh Token rotation       | Auth Server          | One-time-use refresh tokens; replaced with each request.      |
-| 5   | Decoupled authorization      | Auth Server + Config | Tokens validated externally or by config-swappable AS.        |
-| 6   | Attestation verification     | Credential Issuer    | Verify client_attestation JWT via Firebase/App Attest         |
-| 7   | `/nonce` endpoint            | Credential Issuer    | Required for OID4VCI Draft 15; prevents nonce reuse.          |
+| #   | Feature                      | Component            | Description                                              |
+| --- | ---------------------------- | -------------------- | -------------------------------------------------------- |
+| 1   | Credential update & re-issue | Credential Issuer    | Revoked credential can be reissued; old version deleted. |
+| 2   | Credential cleanup           | Cron + DB            | Periodic cleanup of expired credentials.                 |
+| 3   | Refresh Token issued         | Auth Server          | Every access token comes with a refresh token.           |
+| 4   | Refresh Token rotation       | Auth Server          | One-time-use refresh tokens; replaced with each request. |
+| 5   | Decoupled authorization      | Auth Server + Config | Tokens validated externally or by config-swappable AS.   |
+| 6   | Attestation verification     | Authorization Server | Verify `client_attestation` PoP JWT at `/token`          |
+| 7   | `/nonce` endpoint            | Credential Issuer    | Required by OID4VCI; prevents nonce reuse.               |
 
 ---
 
@@ -113,11 +95,10 @@ The system supports multi-tenancy for data isolation in OID4VCI workflows. The C
 graph TD
     subgraph Public
         Wallet[Wallet]
-        Firebase[Firebase App Check]
     end
 
     subgraph DTI
-        Issuer[OID4VC Issuer]
+        Issuer[OID4VC Credential Issuer]
         AuthServer[Authorization Server]
         DB1[(Tenant1 DB)]
         DB2[(Tenant2 DB)]
@@ -125,14 +106,12 @@ graph TD
         DBDefault[(Default DB)]
     end
 
-    Wallet -->|/credential_offer| Issuer
-    Wallet -->|/token| AuthServer
-    Wallet -->|/credential| Issuer
-    Wallet -->|/nonce| Issuer
+    Wallet -->|POST /token| AuthServer
+    Wallet -->|POST /credential| Issuer
+    Wallet -->|GET /nonce| Issuer
 
-    Issuer -->|/grants/pre-authorized-code| AuthServer
-    Issuer -->|/introspect| AuthServer
-    Issuer -->|Verify Attestation| Firebase
+    Issuer -->|POST /grants/pre-authorized-code| AuthServer
+    Issuer -->|POST /introspect| AuthServer
 
     AuthServer -->|Store/Retrieve Tenant1| DB1
     AuthServer -->|Store/Retrieve Tenant2| DB2
@@ -140,78 +119,77 @@ graph TD
     AuthServer -->|Store/Retrieve Default| DBDefault
 ```
 
-**Multi-Tenancy Note**: For multi-tenant deployments, endpoints can be prefixed with `/tenants/{tenant-id}/` to route to tenant-specific databases. See the [Multi-Tenancy](#multi-tenancy) section for details on database-per-tenant model, tenant configuration, and token scoping with the `realm` claim.
+**Note**:
+
+- `credential_offer_uri` is generated and delivered out-of-band (QR code, email, paper mail).\_
+- For multi-tenant deployments, endpoints can be prefixed with `/tenants/{tenant-id}/` to route to tenant-specific databases. See the [Multi-Tenancy](#-multi-tenancy) section for details on the database-per-tenant model and token scoping with the `realm` claim.
 
 ---
 
 ## 🔄 Credential Issuance Flow
 
-This section presents the process for issuing Verifiable Credentials using OpenID for Verifiable Credential Issuance (OID4VCI), covering:
+Covers:
 
 - Pre-authorized code grant registration
-- Client attestation (Firebase App Check or App Attest)
-- Demonstration of Proof-of-Possession (DPoP)
+- DPoP
+- Attestation PoP
 - Token introspection and credential delivery
-- The Wallet requests a nonce from the `/nonce` endpoint to include in the credential proof, ensuring protection against replay attacks (see [Nonce Replay Prevention Controls](#nonce-replay-prevention-controls))
-- The Wallet may use a refresh token to obtain a new access token for subsequent credential requests (see [Refresh Token Flow](#refresh-token-flow))
+- Wallet requests a nonce from `/nonce` for credential proof replay protection
+- Optional refresh token for subsequent credential requests
 
-The following flows outline the initial credential issuance and optional refresh token processes.
-
-### 🧬 Initial Credential Issuance Flow
+### 🧬 Initial Credential Issuance
 
 ```mermaid
 sequenceDiagram
   participant Wallet
-  participant CredentialIssuer
-  participant AuthorizationServer
+  participant CredentialIssuer as Credential Issuer
+  participant AuthorizationServer as Authorization Server
   participant DB
-  Wallet->>CredentialIssuer: GET /credential_offer
+
+  Note over CredentialIssuer,Wallet: credential_offer_uri is generated<br/>and delivered out-of-band<br/>(e.g., QR code, email, paper mail)
   CredentialIssuer->>AuthorizationServer: POST /grants/pre-authorized-code
-  AuthorizationServer->>DB: Store pre-auth-code with subject_id + metadata
+  AuthorizationServer->>DB: Store pre-auth-code + metadata
   AuthorizationServer-->>CredentialIssuer: pre-authorized-code
   CredentialIssuer-->>Wallet: credential_offer_uri
+
   Wallet->>AuthorizationServer: POST /token
-    Note over Wallet, AuthorizationServer: Includes:<br/>- pre-authorized_code<br/>- DPoP JWT
-  alt Token Request Valid
-    AuthorizationServer->>DB: Store access_token with jkt
+  Note over Wallet, AuthorizationServer: Includes:<br/>- pre-authorized_code<br/>- DPoP JWT<br/>- client_attestation PoP JWT
+  alt Valid `/token` request
+    AuthorizationServer->>AuthorizationServer: Validate DPoP + Attestation PoP
+    AuthorizationServer->>DB: Store access_token (with cnf.jkt, amr, attestation metadata) + refresh_token
     AuthorizationServer-->>Wallet: access_token, refresh_token
-  else Token Request Invalid
-    AuthorizationServer-->>Wallet: HTTP 400 (invalid_request)
+  else Invalid
+    AuthorizationServer-->>Wallet: HTTP 400/401
   end
+
   Wallet->>CredentialIssuer: GET /nonce
   CredentialIssuer-->>Wallet: nonce
+
   Wallet->>CredentialIssuer: POST /credential
-    Note over Wallet, CredentialIssuer: Includes:<br/>- access_token<br/>- DPoP JWT<br/>- client_attestation JWT<br/>- credential proof (with /nonce)
-  alt Credential Request Valid
-    CredentialIssuer->>AuthorizationServer: POST /introspect
-    AuthorizationServer->>DB: Validate token, return jkt
-    AuthorizationServer-->>CredentialIssuer: token + jkt
-    CredentialIssuer->>Attestation Provider: Verify attestation (Firebase / App Attest)
-    CredentialIssuer-->>Wallet: Verifiable Credential
-  else Credential Request Invalid
-    CredentialIssuer-->>Wallet: HTTP 400 (invalid_request)
-  end
+  Note over Wallet, CredentialIssuer: Includes:<br/>- access_token<br/>- DPoP JWT<br/>- credential proof (with /nonce)
+  CredentialIssuer->>AuthorizationServer: POST /introspect
+  AuthorizationServer->>DB: Validate token, return cnf.jkt, amr, attestation metadata
+  CredentialIssuer-->>Wallet: Verifiable Credential
 ```
 
 ---
 
 ### 🧬 Refresh Token Flow
 
-The refresh token flow allows wallets to obtain a new access token and refresh token after the initial credential issuance, ensuring long-lived sessions with secure token rotation.
-
 ```mermaid
 sequenceDiagram
   participant Wallet
-  participant AuthorizationServer
+  participant AuthorizationServer as Authorization Server
   participant DB
-  Wallet->>AuthorizationServer: POST /token + refresh_token
+
+  Wallet->>AuthorizationServer: POST /token (grant_type=refresh_token)
   AuthorizationServer->>DB: Validate refresh_token (used=false, revoked=false)
   alt Token Valid
-    DB-->>AuthorizationServer: Token valid
-    AuthorizationServer->>DB: Mark refresh_token as used, store new refresh_token
+    DB-->>AuthorizationServer: Valid
+    AuthorizationServer->>DB: Mark old refresh_token used, store new pair
     AuthorizationServer-->>Wallet: access_token, new refresh_token
   else Token Invalid
-    DB-->>AuthorizationServer: Token invalid or revoked
+    DB-->>AuthorizationServer: Invalid/Revoked/Expired
     AuthorizationServer-->>Wallet: HTTP 401 (invalid_token)
   end
 ```
@@ -220,289 +198,125 @@ sequenceDiagram
 
 ### 🛡️ Enforcement Points
 
-| Component            | Validates                                                                                                                                                     |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Authorization Server | - Pre-auth code<br/>- DPoP JWT (proof-of-possession)<br/>- Refresh token (secondary enforcement via rotation; validated for `used=false` and `revoked=false`) |
-| Credential Issuer    | - Introspection (active token, jkt match)<br/>- Attestation JWT (via Firebase/App Attest)<br/>- Nonce proof                                                   |
+| Component            | Validates                                                                                                                                  |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Authorization Server | Pre-auth code; **DPoP JWT** (proof-of-possession); **Attestation PoP JWT** per policy; refresh token rotation (validated for `used=false`) |
+| Credential Issuer    | Introspection (active token, realm match); **DPoP match (`cnf.jkt`)**; Nonce proof                                                         |
 
 ---
 
 ### 📦 Notes
 
-- Attestation is **verified by the Credential Issuer** during the `/credential` request.
-- DPoP `jkt` thumbprint is stored in `access_token.cnf_jkt`; proof-of-possession is also validated by the Credential Issuer.
-- The `/credential` endpoint uses `/introspect` to validate the access token and retrieve embedded claims (e.g., `cnf.jkt`), then performs its own DPoP checks.
-- Wallets use **Firebase App Check** to generate `client_attestation` JWTs on Android and iOS, which are passed to the Credential Issuer for validation.
+- Attestation PoP is verified by the Authorization Server at `/token`.
+- DPoP `jkt` thumbprint is stored in `access_token.cnf_jkt`, and enforced by both the AS (at `/token`) and Issuer (at `/credential`).
+- The Issuer uses `/introspect` to validate the access token and retrieve embedded claims (e.g., `cnf.jkt`, `amr`, and `attestation` metadata), then performs its own DPoP check.
+- Wallets **do not** send attestation to `/credential`; it’s only relevant at `/token`.
 
 ---
 
-## 🧾 Attestation Validation
+## 🧾 Attestation PoP
 
-### ✅ Overview
+**Purpose:** Provide an additional verifiable PoP signal at `/token`, without any interaction with external attestation providers.
 
-Attestation ensures that credential requests come from trusted wallet apps on secure devices, helping prevent misuse by blocking tampered, emulated, or unauthorized clients.
+### Flow
 
-This implementation supports Attestation-Based Client Authentication (ABCA) as outlined in the IETF draft:
-[OAuth Attestation-Based Client Authentication](https://datatracker.ietf.org/doc/draft-ietf-oauth-attestation-based-client-auth/)
+1. **Client Attestation PoP JWT (policy-driven)**
 
-Attestation enables wallets or clients to prove properties about themselves—such as app integrity or device trustworthiness—during token or credential issuance. These claims are cryptographically verifiable and can influence credential access policies.
+   - Issued by the wallet provider and signed.
+   - Contains claims the Auth Server can verify (e.g., `iss`, `sub`, `iat`, `exp`, a key-binding claim).
 
-The wallet provider generates an attestation credential (e.g., Firebase App Check JWT for Android/iOS). The wallet includes it in the /credential request as the client_attestation field. The Credential Issuer verifies the token and decides whether to issue the credential based on trust policies (e.g., auto_trust or allow_list).
+2. **Verification (Authorization Server)**
 
----
+   - Validate signature and required claims.
+   - Optionally bind to the same key used for DPoP by matching a thumbprint (`jkt`) claim.
+   - Apply trust policy: `auto_trust`, `allow_list`, or `deny_list`.
 
-### 🧾 Firebase App Check Attestation (Android & iOS)
+3. **Outcome**
+   - If policy requires attestation PoP and verification fails → `invalid_attestation`.
+   - On success, record outcome in `ACCESS_TOKEN.metadata` and add `"att-pop"` to `amr`.
 
-This project supports **attestation-based client authentication** using [Firebase App Check](https://firebase.google.com/docs/app-check), which works on both:
-
-- **Android** (via **Play Integrity API**)
-- **iOS** (via **Apple App Attest**)
-
-Wallets use platform-specific APIs under the hood, but both produce a signed **App Check JWT**, which is submitted to the Credential Issuer, and verified by the Issuer using Firebase’s REST API.
-
----
-
-### ✅ Attestation Flow
-
-Attestations (e.g., Firebase App Check tokens, device claims) are generated and signed by the wallet or mobile platform provider. These signed JWTs are passed by the wallet in the client_attestation field during the credential request.
-
-The Authorization Server is responsible for OAuth2 flows only (e.g., pre-authorized_code, DPoP access tokens) and does not validate attestations.
-
-The Credential Issuer validates the attestation JWT by verifying its signature, extracting trusted metadata, and applying a configurable trust policy to decide whether to issue the requested credential.
-
-```mermaid
-
-sequenceDiagram
-    participant Wallet
-    participant WalletProvider
-    participant AuthServer as Authorization Server
-    participant Issuer as Credential Issuer
-    participant Firebase
-
-    Wallet->>WalletProvider: Request attestation credential
-    WalletProvider->>Firebase: Get App Check token
-    Firebase-->>WalletProvider: JWT attestation token
-    WalletProvider-->>Wallet: JWT attestation token
-    Wallet->>AuthServer: Request access token (pre-authorized code + DPoP)
-    AuthServer-->>Wallet: access_token
-    Wallet->>Issuer: Credential request + client_attestation JWT
-    Issuer->>Firebase: Verify attestation via REST API
-    alt Attestation Valid
-        Firebase-->>Issuer: Token valid
-        Issuer->>Wallet: Verifiable Credential
-    else Attestation Invalid
-        Firebase-->>Issuer: Token invalid
-        Issuer-->>Wallet: Error (e.g., 400 invalid_attestation)
-    end
-```
-
-> _Note: Attestation is only evaluated at the credential issuance step._
-
----
-
-### 🧾 Sample Credential Request with client_attestation
-
-**Included in `/credential` request:**
+### Example `/token` Request (with Attestation PoP)
 
 ```http
-POST /credential
-Authorization: Bearer <access_token>
+POST /token
+Content-Type: application/x-www-form-urlencoded
 DPoP: <signed DPoP JWT>
-Content-Type: application/json
 
-{
-  "format": "vc+sd-jwt",
-  "type": "OntarioBusinessCard",
-  "client_attestation": "eyJhbGciOiJSUzI1NiIs...",   // add this
-  "proof": { "proof_type": "jwt", "jwt": "..." }
-}
+grant_type=urn:ietf:params:oauth:grant-type:pre-authorized_code&
+pre-authorized_code=abc123&
+client_attestation=eyJhbGciOiJSUzI1NiIs...
 ```
+
+### Trust Policy Modes
+
+- **auto_trust** – Accept any syntactically valid, verifiable PoP JWT.
+- **allow_list** – Accept only if (`sub`, optional `jkt`) pair appears in a configured list.
+- **deny_list** – Explicitly reject known-bad `sub` (and/or `jkt`).
+
+**Errors (Auth Server):**
+
+- `invalid_attestation` – Missing/malformed/expired/failed verification.
+- `invalid_request` – Violates trust policy.
 
 ---
 
-### 🔍 Verify using Firebase REST API (performed by Credential Issuer):
-
-```http
-POST https://firebaseappcheck.googleapis.com/v1/projects/{project-id}/apps/{app-id}:verifyAppCheckToken
-Authorization: Bearer {service-account-access-token}
-Content-Type: application/json
-
-{
-  "app_check_token": "eyJhbGciOiJSUzI1NiIs..."
-}
-```
-
-**Successful response:**
-
-```json
-{
-  "token": {
-    "ttl": "300s",
-    "issuedAtTime": "2025-07-17T18:00:00Z"
-  }
-}
-```
-
-- ✅ Allow credentials only for verified Firebase apps
-- 🔐 Enforce known app package IDs or Apple team IDs
-- 🚫 Block requests from rooted/jailbroken/emulated devices
-- 🔎 Log attestation type (Play Integrity vs App Attest) for analytics or auditing
-
----
-
-### 🧭 Trust Decision Logic
-
-The **Credential Issuer**, after verifying the attestation token, applies a trust policy to determine if the wallet is authorized to receive a credential.
-
-### ⚙️ Trust Policy Flow
-
-1. **Attestation Verification** – Performed by the Credential Issuer via Firebase REST API.
-2. **Trust Decision** – Made using:
-   - `attestation.sub`: Subject identifier in the attestation token.
-   - `cnf.jkt`: Client's DPoP key thumbprint.
-3. **Trust Policy Modes**:
-   - `auto_trust`: Accept all verified attestation tokens.
-   - `allow_list`: Only issue credentials if both `sub` and `jkt` are found in a trusted list.
-
-### 📋 Allow List Structure
-
-```json
-{
-  "trusted_clients": [
-    {
-      "sub": "firebase_app_id_123",
-      "jkt": "base64url_jkt_thumbprint"
-    },
-    {
-      "sub": "apple_team_id_abc",
-      "jkt": "base64url_jkt_thumbprint"
-    }
-  ]
-}
-```
-
-### 📘 OpenID4VCI Attestation Credential Metadata
-
-Per [Appendix E](https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html#appendix-E) of the OpenID4VCI specification:
-
-```json
-{
-  "format": "jwt_vc",
-  "types": ["VerifiableCredential", "Attestation"],
-  "trust_framework": "firebase_app_check",
-  "evidence": {
-    "type": "app_attestation",
-    "sub": "firebase_app_id_123",
-    "jkt": "base64url_jkt_thumbprint",
-    "timestamp": "2025-07-17T18:00:00Z"
-  }
-}
-```
-
----
-
-### 📘 References
-
-- Firebase App Check: [https://firebase.google.com/docs/app-check](https://firebase.google.com/docs/app-check)
-- REST Verification API: [https://firebase.google.com/docs/reference/app-check/rest/v1](https://firebase.google.com/docs/reference/app-check/rest/v1)
-- Apple App Attest: [https://developer.apple.com/documentation/devicecheck/implementing_app_attest](https://developer.apple.com/documentation/devicecheck/implementing_app_attest)
-- Play Integrity API: [https://developer.android.com/google/play/integrity](https://developer.android.com/google/play/integrity)
-
----
-
-## 🔐 DPoP (Demonstration of Proof-of-Possession) Support
+## 🔐 DPoP (Demonstration of Proof-of-Possession)
 
 ### ✅ Overview
 
-Demonstration of Proof-of-Possession (DPoP) ensures that access tokens are bound to a client’s private key, preventing unauthorized use of stolen tokens (RFC 9449).
+DPoP ensures that access tokens are bound to a client’s private key, preventing unauthorized use of stolen tokens (RFC 9449).
 
-### ✅ DPoP Support
+### ✅ Support
 
-- **Required for /token and /credential**: DPoP is mandatory for both the `/token` and `/credential` endpoints, ensuring that only the client possessing the private key can use the issued access token.
-- **Access tokens include cnf.jkt thumbprint**: The access token includes a `cnf.jkt` claim, containing the JSON Web Key Thumbprint (JKT) of the client’s public key, binding the token to the client’s DPoP key pair.
-- **Replay protection enforced using jti**: The `jti` (JSON Web Token ID) claim in the DPoP JWT is validated to ensure uniqueness, preventing replay attacks by rejecting reused DPoP proofs.
-- **Credential Issuer matches DPoP proof with cnf.jkt**: The Credential Issuer verifies that the DPoP JWT provided in the `/credential` request matches the `cnf.jkt` in the access token, ensuring proof-of-possession.
-
-**Note**: See [Terminology](#terminology) for definitions of JKT and JTI, and [Error Handling](#error-handling) for DPoP-specific errors (`invalid_dpop_proof`, `replay_detected`).
+- **Required for `/token` and `/credential`**.
+- Access tokens include a `cnf.jkt` claim (JWK Thumbprint) binding the token to the client’s DPoP key.
+- Replay protection via `jti` on DPoP JWTs.
 
 ### 🧬 Token Binding Flow with DPoP
 
 ```mermaid
 sequenceDiagram
   participant Wallet
-  participant AuthServer
-  participant Issuer
-  Wallet->>AuthServer: POST /token + DPoP JWT
-  AuthServer-->>Wallet: access_token (with cnf.jkt)
+  participant AuthServer as Authorization Server
+  participant Issuer as Credential Issuer
+  Wallet->>AuthServer: POST /token + DPoP JWT + Attestation PoP
+  AuthServer-->>Wallet: access_token (with cnf.jkt, amr) + refresh_token
   Wallet->>Issuer: POST /credential + DPoP JWT
-  Issuer-->>Wallet: Return VC
+  Issuer-->>Wallet: Verifiable Credential
 ```
 
 ### 🛠️ Implementation Steps
 
-1. **Client Generates DPoP Key Pair**:
-
-   - Public JWK is included in `DPoP` JWT header.
-   - JWT includes: `htm`, `htu`, and `jti` claims.
-     - `htm`: HTTP method (e.g., "POST")
-     - `htu`: HTTP URI (e.g., "https://issuer.example.com/credential")
-     - `jti`: Unique identifier for the DPoP JWT, used to prevent replay.
-
-2. **Client Sends DPoP Header with `/token` Request**:
-
-   ```http
-   POST /token
-   Authorization: DPoP <signed JWT>
-   ```
-
-3. **Authorization Server Validates**:
-
-   - Signature
-   - `htu` and `htm` match
-   - `jti` is unique (prevents replay)
-   - Extracts JWK thumbprint (`cnf.jkt`) for access token
-
-4. **Issued Access Token Contains `cnf` Claim**:
-
-   ```json
-   {
-     "cnf": {
-       "jkt": "<base64url JWK thumbprint>"
-     }
-   }
-   ```
-
-5. **Credential Issuer Enforces DPoP on `/credential`**:
-   - Re-validates proof-of-possession
+1. Client generates DPoP key pair (public JWK appears in `DPoP` header).
+2. Client sends DPoP header with `/token`.
+3. Auth Server validates signature, `htu`/`htm`, and `jti` uniqueness; derives `cnf.jkt`.
+4. Issued access token contains `cnf.jkt`.
+5. Issuer enforces DPoP on `/credential` by matching request DPoP proof to `cnf.jkt`.
 
 ---
 
 ## 🔄 RFC 7591/7592: Dynamic Client Registration
 
-### ✅ Overview
-
-Credential Issuer, acting on behalf of a trusted program owner, performs client registration internally when generating a credential offer. It ensures:
+The Credential Issuer, acting on behalf of a trusted program owner, performs client registration internally when generating a credential offer. It ensures:
 
 - Only authorized credential offers are issued
 - Wallets are provisioned with appropriate scopes and authorization context
-- Client metadata is linked to the credential issuance transaction (e.g. tx_code, supported_cred_id)
+- Client metadata is linked to the credential issuance transaction (e.g., `tx_code`, `supported_cred_id`)
 
-The Credential Issuer registers the subject of the credential using `subject_id`. This ID may be UUID or another privacy-preserving identifier. It is distinct from any external system identifiers.
-
-### 🔧 Registration Flow
+The Credential Issuer registers the subject of the credential using `subject_id` (UUID or another privacy-preserving identifier).
 
 ```mermaid
 sequenceDiagram
     participant Wallet
-    participant CredentialIssuer
-    participant AuthServer
+    participant CredentialIssuer as Credential Issuer
+    participant AuthServer as Authorization Server
     participant DB
 
     Wallet->>CredentialIssuer: GET /credential_offer
-    CredentialIssuer->>CredentialIssuer: Generate unique subject_id and tx_code
+    CredentialIssuer->>CredentialIssuer: Generate subject_id and tx_code
 
     CredentialIssuer->>AuthServer: POST /grants/pre-authorized-code (subject_id, supported_cred_id, tx_code)
-    AuthServer->>DB: Store pre-auth-code, link to subject_id
+    AuthServer->>DB: Store pre-auth-code (link to subject_id)
 
     AuthServer-->>CredentialIssuer: pre-auth-code
     CredentialIssuer-->>Wallet: credential_offer_uri (QR or link)
@@ -510,13 +324,13 @@ sequenceDiagram
     Wallet->>CredentialIssuer: GET /.well-known/openid-credential-issuer
     CredentialIssuer-->>Wallet: Metadata (token/credential endpoints)
 
-    Wallet->>AuthServer: POST /token (pre-auth-code + DPoP)
-    AuthServer->>DB: Validate code, bind DPoP
+    Wallet->>AuthServer: POST /token (pre-auth-code + DPoP + attestation PoP)
+    AuthServer->>DB: Validate + bind DPoP + attestation policy
     AuthServer-->>Wallet: access_token + refresh_token
 
     Wallet->>CredentialIssuer: POST /credential + DPoP
     CredentialIssuer->>AuthServer: POST /introspect
-    AuthServer-->>CredentialIssuer: token is active + authorization_details
+    AuthServer-->>CredentialIssuer: token is active + authorization_details + cnf.jkt + amr/attestation
     CredentialIssuer-->>Wallet: Verifiable Credential
 ```
 
@@ -524,23 +338,20 @@ sequenceDiagram
 
 ## 🔐 Nonce Replay Prevention Controls
 
-To prevent replay attacks in the credential issuance process, the `/nonce` endpoint provides a unique, time-bound nonce for use in the `/credential` request proof. The following controls ensure robust nonce management:
+To prevent replay attacks in the credential issuance process, the `/nonce` endpoint provides a unique, time-bound nonce for use in the `/credential` request proof. Controls:
 
-- Nonces are stored in the `NONCE` table with a unique `value` field (indexed for efficient lookup), a `used` flag, and an `expires_at` timestamp. The `credential_id` field links to the `SUBJECT.subject_id` (a UUID) to scope nonces to a specific subject.
-- The Credential Issuer validates that the nonce exists, is unused (`used=false`), and has not expired (`expires_at > CURRENT_TIMESTAMP`).
-- After successful validation, the nonce is marked as `used` to prevent reuse.
-- If the nonce is invalid (nonexistent, already used, or expired), the Credential Issuer returns an HTTP 400 response with an `invalid_request` error code and a descriptive message (e.g., "Nonce is invalid or expired").
-- Expired nonces are periodically cleaned up via a cron job to maintain database efficiency.
-- The `/nonce` endpoint is rate-limited to 10 requests per minute per client IP to prevent abuse and denial-of-service attacks.
+- Nonces are stored in the `NONCE` table with a unique `value`, `used` flag, and `expires_at`. The `credential_id` links to the `SUBJECT.subject_id` (UUID).
+- The Issuer validates that the nonce exists, is unused, and unexpired; then marks it `used`.
+- Invalid/expired → HTTP 400 `invalid_request`.
+- Periodic cleanup of expired nonces.
+- Rate limit `/nonce` (e.g., 10 req/min/IP).
 
-**Note**: Replay protection for DPoP JWTs is enforced using the `jti` claim, complementing nonce-based replay prevention (see [DPoP Support](#dpop-support)).
-
-### 🧬 Nonce Flow
+**Nonce Flow**
 
 ```mermaid
 sequenceDiagram
     participant Wallet
-    participant CredentialIssuer
+    participant CredentialIssuer as Credential Issuer
     participant DB
     Wallet->>CredentialIssuer: GET /nonce
     CredentialIssuer->>DB: Store nonce (value, expires_at, used=false)
@@ -549,30 +360,29 @@ sequenceDiagram
     Wallet->>CredentialIssuer: POST /credential + nonce in proof
     CredentialIssuer->>DB: Validate nonce (exists, used=false, not expired)
     alt Nonce Valid
-    DB-->>CredentialIssuer: Nonce valid
-    CredentialIssuer->>DB: Mark nonce as used
-    CredentialIssuer-->>Wallet: Verifiable Credential
+      DB-->>CredentialIssuer: Valid
+      CredentialIssuer->>DB: Mark nonce used
+      CredentialIssuer-->>Wallet: Verifiable Credential
     else Nonce Invalid
-    DB-->>CredentialIssuer: Nonce invalid or expired
-    CredentialIssuer-->>Wallet: HTTP 400 (invalid_request)
+      DB-->>CredentialIssuer: Invalid/Expired
+      CredentialIssuer-->>Wallet: HTTP 400 (invalid_request)
     end
-    Note over CredentialIssuer,DB: Periodic cleanup of expired nonces
 ```
+
+---
 
 ## 📘 API Endpoints
 
-### ✅ API Endpoint Summary
-
-#### Authorization Server Endpoints
+### Authorization Server
 
 | Endpoint                            | Method | Auth              | Description                          |
 | ----------------------------------- | ------ | ----------------- | ------------------------------------ |
-| `/token`                            | POST   | DPoP              | Token exchange (pre-auth or refresh) |
-| `/introspect`                       | POST   | ClientId + Secret | Token validation                     |
-| `/grants/pre-authorized-code`       | POST   | ClientId + Secret | Pre-authorization_code grant.        |
-| `/.well-known/openid-configuration` | GET    | None              | Auth Server Metadata discovery       |
+| `/token`                            | POST   | DPoP + att PoP    | Token exchange (pre-auth or refresh) |
+| `/introspect`                       | POST   | ClientId + Secret | Token validation + attestation       |
+| `/grants/pre-authorized-code`       | POST   | ClientId + Secret | Issue a pre-authorized code grant.   |
+| `/.well-known/openid-configuration` | GET    | None              | Auth Server metadata discovery       |
 
-#### Credential Issuer Endpoints
+### Credential Issuer
 
 | Endpoint                                | Method | Auth          | Description                      |
 | --------------------------------------- | ------ | ------------- | -------------------------------- |
@@ -581,13 +391,11 @@ sequenceDiagram
 | `/nonce`                                | GET    | None          | Nonce for credential proof       |
 | `/.well-known/openid-credential-issuer` | GET    | None          | OID4VC Issuer metadata discovery |
 
-**Multi-Tenancy Note**: For multi-tenant deployments, endpoints can be prefixed with `/tenants/{tenant-id}/` to route to tenant-specific databases. See the [Multi-Tenancy](#multi-tenancy) section for details on database-per-tenant model, tenant configuration, and token scoping with the `realm` claim.
-
 ---
 
 ### 🔐 `POST /token`
 
-Exchanges a pre-authorized code or refresh token for an access token and new refresh token. For refresh token requests, the Authorization Server validates that the token is unused (`used=false`) and not revoked (`revoked=false`) before issuing a new access token and rotating the refresh token. The `user_pin` parameter is optional and only required if `user_pin_required` is `true` in the credential offer, providing an additional layer of security for specific use cases (e.g., high-value credentials).
+Exchanges a pre-authorized code or refresh token for an access token (and new refresh token for rotation). If policy requires attestation PoP, the request must include `client_attestation`.
 
 **Request**
 
@@ -595,9 +403,11 @@ Exchanges a pre-authorized code or refresh token for an access token and new ref
 POST /token
 Content-Type: application/x-www-form-urlencoded
 DPoP: <signed DPoP JWT>
+
 grant_type=urn:ietf:params:oauth:grant-type:pre-authorized_code&
 pre-authorized_code=abc123&
-user_pin=1234
+user_pin=1234&
+client_attestation=eyJhbGciOiJSUzI1NiIs...
 ```
 
 **Response**
@@ -616,22 +426,22 @@ user_pin=1234
       "types": ["VerifiableCredential", "OntarioBusinessCard"]
     }
   ],
-  "cnf": {
-    "jkt": "base64url-encoded-thumbprint"
-  }
+  "cnf": { "jkt": "base64url-encoded-thumbprint" },
+  "amr": ["dpop", "att-pop"]
 }
 ```
 
-**Errors**:
+**Errors**
 
-- HTTP 400 (invalid_request): Invalid pre-authorized code, DPoP JWT.
-- HTTP 401 (invalid_token): Invalid or revoked refresh token.
+- HTTP 400 `invalid_request`: Invalid pre-authorized code, DPoP JWT, malformed attestation PoP.
+- HTTP 401 `invalid_token`: Invalid or revoked refresh token.
+- HTTP 401 `invalid_attestation`: Attestation PoP required by policy but missing or failed verification.
 
 ---
 
 ### 📤 `POST /introspect`
 
-Used by the Credential Issuer to verify bearer tokens before releasing credential.
+Used by the Credential Issuer to verify tokens before releasing credentials. Includes attestation outcome metadata when present.
 
 **Request**
 
@@ -662,65 +472,34 @@ token_type_hint=access_token
       "types": ["VerifiableCredential", "OntarioBusinessCard"]
     }
   ],
-  "cnf": {
-    "jkt": "QmFzZTY0ZW5jb2RlZFRodW1icHJpbnQ="
-  },
+  "cnf": { "jkt": "QmFzZTY0ZW5jb2RlZFRodW1icHJpbnQ=" },
   "iss": "https://auth.example.com",
-  "realm": "tenant1"
-}
-```
-
-**Errors**:
-
-- HTTP 401 (invalid_client): Invalid client credentials.
-- HTTP 400 (invalid_request): Invalid token or token type hint.
-
----
-
-### 🔐 POST /grants/pre-authorized-code
-
-Request pre-authorized code. The `external_user_ref` field links the subject to an external identity provider (e.g., Okta) for integration with existing user management systems, but it is optional and not required for credential issuance
-
-**Request:**
-
-```http
-POST /grants/pre-authorized-code
-Content-Type: application/json
-Authorization: Bearer internal-access-token
-```
-
-**Request body:**
-
-```http
-HTTP/1.1 200 OK
-Content-Type: application/json
-```
-
-```json
-{
-  "subject_id": "c26fe7f5-6bd8-41c5-b0af-c2f555ec89f7",
-  "metadata": {
-    "tx_code": "abc-001",
-    "supported_cred_id": "OntarioBusinessCard",
-    "external_user_ref": "okta|00u1abcxyz"
+  "realm": "tenant1",
+  "amr": ["dpop", "att-pop"],
+  "attestation": {
+    "present": true,
+    "verified": true,
+    "policy": "allow_list",
+    "decision": "trusted",
+    "jkt": "QmFzZTY0ZW5jb2RlZFRodW1icHJpbnQ=",
+    "sub": "wallet.app.id:123",
+    "hash": "sha256:2f1c...ab",
+    "iat": 1721028000,
+    "exp": 1721031600
   }
 }
 ```
 
-**Response:**
+**Errors**
 
-```json
-{
-  "grant_type": "urn:ietf:params:oauth:grant-type:pre-authorized_code",
-  "pre-authorized_code": "xyz456"
-}
-```
+- HTTP 401 `invalid_client`: Invalid client credentials.
+- HTTP 400 `invalid_request`: Invalid token or token type hint.
 
 ---
 
 ### 📤 `POST /credential`
 
-Request a credential using an access token.
+Request a credential using an access token. (No attestation here; enforced at `/token`).
 
 **Request**
 
@@ -733,10 +512,7 @@ Content-Type: application/json
 {
   "format": "vc+sd-jwt",
   "type": "OntarioBusinessCard",
-  "proof": {
-    "proof_type": "jwt",
-    "jwt": "eyJ0eXAiOiJKV1Q..."
-  }
+  "proof": { "proof_type": "jwt", "jwt": "eyJ0eXAiOiJKV1Q..." }
 }
 ```
 
@@ -745,17 +521,13 @@ Content-Type: application/json
 ```json
 {
   "format": "vc+sd-jwt",
-  "credential": "eyJhbGciOiJFZERTQSJ9...sig", // SD-JWT compact format
-  "issuer_signed_attestations": {
-    "alg": "ES256",
-    "kid": "did:example:issuer#keys-1"
-  }
+  "credential": "eyJhbGciOiJFZERTQSJ9...sig"
 }
 ```
 
-**Errors**:
+**Errors**
 
-- HTTP 400 (invalid_request): Invalid access token, DPoP JWT, or nonce proof.
+- HTTP 400 `invalid_request`: Invalid access token, DPoP JWT, or nonce proof.
 
 ---
 
@@ -777,7 +549,7 @@ GET /credential_offer
 }
 ```
 
-Decoded credential_offer:
+Decoded `credential_offer`:
 
 ```json
 {
@@ -804,7 +576,7 @@ Decoded credential_offer:
 
 ### 🔄 `GET /nonce`
 
-Provides a unique, time-bound nonce for use in the `/credential` request proof to prevent replay attacks. See [Nonce Replay Prevention Controls](#nonce-replay-prevention-controls) for details on replay prevention and security measures.
+Provides a unique, time-bound nonce for the `/credential` proof to prevent replay attacks. See [Nonce Replay Prevention Controls](#-nonce-replay-prevention-controls).
 
 **Request**
 
@@ -823,7 +595,7 @@ GET /nonce
 
 **Errors**
 
-HTTP 429 (Too Many Requests): Returned if the rate limit of 10 requests per minute per client IP is exceeded (see [Nonce Replay Prevention Controls](#nonce-replay-prevention-controls)).
+- HTTP 429 `too_many_requests` if rate limit is exceeded.
 
 ---
 
@@ -872,7 +644,8 @@ GET /.well-known/openid-configuration
   "token_endpoint": "https://auth.example.com/token",
   "token_endpoint_auth_methods_supported": ["none"],
   "grant_types_supported": [
-    "urn:ietf:params:oauth:grant-type:pre-authorized_code"
+    "urn:ietf:params:oauth:grant-type:pre-authorized_code",
+    "refresh_token"
   ],
   "authorization_details_types_supported": ["openid_credential"],
   "jwks_uri": "https://auth.example.com/jwks",
@@ -883,24 +656,20 @@ GET /.well-known/openid-configuration
 ### 🔍 Error Handling
 
 - Standard OAuth2 errors: `invalid_token`, `expired_token`, `invalid_grant`, etc.
-- DPoP errors: `invalid_dpop_proof`, `replay_detected` (see [DPoP Support](#dpop-support)).
-- Nonce errors: `invalid_request` for invalid or expired nonces, `too_many_requests` for exceeding rate limits (see [Nonce Replay Prevention Controls](#nonce-replay-prevention-controls)).
-- Attestation errors: `invalid_attestation` or `invalid_request`, returned by the Credential Issuer if the `client_attestation` JWT is missing, malformed, expired, or fails verification (see [Attestation Validation](#attestation-validation)).
+- DPoP errors: `invalid_dpop_proof`, `replay_detected`.
+- Nonce errors: `invalid_request` for invalid/expired nonces; `too_many_requests` for exceeding rate limits.
+- Attestation errors: `invalid_attestation` or `invalid_request` if `client_attestation` is missing/invalid or fails policy.
 
 ---
 
 ## 🗄️ Database Schema Diagram
 
-This project uses PostgreSQL as the persistence engine. For consistency and readability, we adhere to the following conventions:
+This project uses PostgreSQL. Conventions:
 
-- Singular table names: Aligns with modern ORM practices (e.g., SQLAlchemy) and avoids pluralization ambiguities.
-- Timestamps: All tables include created_at and updated_at fields (using TIMESTAMPTZ) for auditing and versioning, defaulting to CURRENT_TIMESTAMP on insert/update.
-- Foreign Keys: Use ON DELETE CASCADE for child records (e.g., tokens tied to a subject) to prevent orphans, and ON UPDATE CASCADE for ID propagation.
-- Indexing: Key fields are indexed for performance. The last column in the schema diagram indicates:
-  - PK: Primary Key
-  - FK: Foreign Key
-  - UK: Unique index for uniqueness enforcement and fast lookups (maps to PostgreSQL CREATE UNIQUE INDEX)
-  - INDEX: Non-unique index for fast lookups (maps to PostgreSQL CREATE INDEX)
+- Singular table names.
+- Timestamps (`created_at`, `updated_at`) using `TIMESTAMPTZ`.
+- Foreign Keys with `ON DELETE CASCADE` where appropriate.
+- Indexing on key lookup fields.
 
 ```mermaid
 erDiagram
@@ -974,24 +743,25 @@ erDiagram
     }
 ```
 
+**Note**: ACCESS_TOKEN.metadata may include amr and attestation outcome.
+
 ---
 
 ## 🛡️ Enhancements & Security Notes
 
-- **Logging**: Audit issuance, revocation, refresh events.
+- **Logging**: Audit issuance, revocation, refresh events, and attestation outcomes.
 - **Rate Limiting**: Throttle abuse or brute-force attempts.
-- **Token Format**: Access tokens are JWTs with claims (`aud`, `exp`, `cnf`, etc.).
-- **Token Expiration**: Based on Solution Architecture Design (SAD) default settings.
+- **Token Format**: Access tokens are JWTs with claims (`aud`, `exp`, `cnf`, `amr`, etc.).
 - **DPoP Key Lifecycle**: Clients manage DPoP key pairs; rotate if compromised.
 - **CORS**: Restrict cross-origin requests where applicable.
 
 ## 📘 Terminology
 
-- **JWT (JSON Web Token)**: A compact, signed token format for secure data exchange (RFC 7519).
-- **JWK (JSON Web Key)**: A JSON representation of a cryptographic key (RFC 7517).
-- **JKT (JSON Web Key Thumbprint)**: A base64url-encoded hash of a JWK, used to uniquely identify a client’s public key (RFC 7638). In this system, JKT is used in DPoP and attestation flows.
-- **JTI (JSON Web Token ID)**: A unique identifier for a JWT, used to prevent replay in DPoP flows.
-- **DPoP (Demonstration of Proof-of-Possession)**: A mechanism to bind access tokens to a client’s private key, ensuring only the authorized client can use the token (RFC 9449).
-- **Attestation**: A cryptographically verifiable claim about a client’s properties (e.g., app integrity), provided by a wallet provider and verified by the Credential Issuer.
-- **Pre-authorized Code**: A one-time-use code issued by the Authorization Server to enable credential issuance without user login in the OID4VCI flow.
-- Realm: A logical identifier that maps a token to a specific tenant.
+- **JWT (JSON Web Token)**: A compact, signed token format (RFC 7519).
+- **JWK (JSON Web Key)**: JSON representation of a cryptographic key (RFC 7517).
+- **JKT (JWK Thumbprint)**: Base64url-encoded hash of a JWK (RFC 7638). Used in DPoP and, optionally, in attestation PoP binding.
+- **JTI (JWT ID)**: Unique ID for a JWT, used for replay prevention in DPoP flows.
+- **DPoP**: Mechanism to bind access tokens to a client’s key (RFC 9449).
+- **Attestation PoP**: JWT from the wallet, verified by the Authorization Server to assert client/app properties under a trust policy.
+- **Pre-authorized Code**: One-time-use code issued by the AS to enable issuance without user login.
+- **Realm**: Logical identifier mapping a token to a specific tenant.
